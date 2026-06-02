@@ -1,5 +1,5 @@
 # ── Stage 1: compile to a self-contained binary ──────────────────────────────
-FROM oven/bun:1 AS builder
+FROM oven/bun:1-alpine AS builder
 
 WORKDIR /app
 COPY server.js .
@@ -8,9 +8,12 @@ COPY server.js .
 RUN bun build --compile --outfile config-server server.js
 
 # ── Stage 2: minimal runtime image ───────────────────────────────────────────
-FROM debian:12-slim
+FROM alpine:latest
 
 WORKDIR /app
+
+# Install glibc compatibility for the compiled binary (much smaller than gcc)
+RUN apk add --no-cache libc6-compat
 
 COPY --from=builder /app/config-server .
 
