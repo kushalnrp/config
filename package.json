@@ -1,11 +1,13 @@
 {
   "name": "config",
   "version": "1.0.0",
-  "description": "Node.js server for configs and secrets backed by SQLite",
+  "description": "Bun server for key-value config storage backed by SQLite",
   "main": "server.js",
+  "type": "module",
   "scripts": {
-    "test": "node --test",
-    "start": "node server.js"
+    "test": "bun test",
+    "start": "bun server.js",
+    "build": "bun build --compile --outfile config-server server.js"
   },
   "repository": {
     "type": "git",
@@ -14,12 +16,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/kushalnrp/config/issues"
   },
-  "homepage": "https://github.com/kushalnrp/config#readme",
-  "dependencies": {
-    "sqlite3": "^6.0.1"
-  }
+  "homepage": "https://github.com/kushalnrp/config#readme"
 }

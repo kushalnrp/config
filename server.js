@@ -129,7 +129,7 @@ export function createServer({ dbPath = "data/config.db", port = 0 } = {}) {
 }
 
 if (import.meta.main) {
-  const port = Number(process.env.PORT || 3000);
+  const port = Number(process.env.CONFIG_PORT || 2001);
   const dbPath = process.env.CONFIG_DB_PATH || "data/config.db";
   const server = createServer({ dbPath, port });
   console.log(`Config server listening on port ${server.port}`);
