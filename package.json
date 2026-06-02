@@ -1,0 +1,25 @@
+{
+  "name": "config",
+  "version": "1.0.0",
+  "description": "Node.js server for configs and secrets backed by SQLite",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kushalnrp/config.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kushalnrp/config/issues"
+  },
+  "homepage": "https://github.com/kushalnrp/config#readme",
+  "dependencies": {
+    "sqlite3": "^6.0.1"
+  }
+}
