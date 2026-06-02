@@ -1,141 +1,136 @@
-const http = require('node:http');
-const { URL } = require('node:url');
-const sqlite3 = require('sqlite3').verbose();
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
-function createStorage(dbPath = 'config.db') {
-  const db = new sqlite3.Database(dbPath);
+function createStorage(dbPath = "data/config.db") {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
 
-  db.serialize(() => {
-    db.run(
-      `CREATE TABLE IF NOT EXISTS entries (
-        type TEXT NOT NULL,
-        key TEXT NOT NULL,
-        value TEXT NOT NULL,
-        PRIMARY KEY (type, key)
-      )`
-    );
+  db.run(`CREATE TABLE IF NOT EXISTS entries (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`);
+
+  const stmtGet          = db.prepare("SELECT value FROM entries WHERE key = ?");
+  const stmtGetAll       = db.prepare("SELECT key, value FROM entries ORDER BY key");
+  const stmtGetPrefix    = db.prepare("SELECT key, value FROM entries WHERE key LIKE ? ORDER BY key");
+  const stmtSet          = db.prepare("INSERT INTO entries (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  const stmtDelete       = db.prepare("DELETE FROM entries WHERE key = ?");
+  const stmtDeletePrefix = db.prepare("DELETE FROM entries WHERE key LIKE ?");
+  const stmtDeleteAll    = db.prepare("DELETE FROM entries");
+
+  const setMany = db.transaction((entries) => {
+    for (const { key, value } of entries) stmtSet.run(key, value);
   });
 
   return {
-    set(type, key, value) {
-      return new Promise((resolve, reject) => {
-        db.run(
-          'INSERT INTO entries (type, key, value) VALUES (?, ?, ?) ON CONFLICT(type, key) DO UPDATE SET value = excluded.value',
-          [type, key, value],
-          (err) => (err ? reject(err) : resolve())
-        );
-      });
-    },
-    get(type, key) {
-      return new Promise((resolve, reject) => {
-        db.get(
-          'SELECT value FROM entries WHERE type = ? AND key = ?',
-          [type, key],
-          (err, row) => (err ? reject(err) : resolve(row ? row.value : null))
-        );
-      });
-    },
-    close() {
-      return new Promise((resolve, reject) => {
-        db.close((err) => (err ? reject(err) : resolve()));
-      });
-    }
+    get:           (key)            => stmtGet.get(key),
+    getAll:        ()               => stmtGetAll.all(),
+    getByPrefix:   (prefix)         => stmtGetPrefix.all(`${prefix}%`),
+    set:           (key, value)     => stmtSet.run(key, value),
+    setMany,
+    delete:        (key)            => stmtDelete.run(key).changes,
+    deleteByPrefix:(prefix)         => stmtDeletePrefix.run(`${prefix}%`).changes,
+    deleteAll:     ()               => stmtDeleteAll.run().changes,
+    close:         ()               => db.close(),
   };
 }
 
-function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => {
-      if (!chunks.length) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new Error('Invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
+function json(data, status = 200) {
+  return Response.json(data, { status });
 }
 
-function sendJson(res, statusCode, body) {
-  const payload = JSON.stringify(body);
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload)
-  });
-  res.end(payload);
-}
-
-function createServer({ dbPath = 'config.db' } = {}) {
+export function createServer({ dbPath = "data/config.db", port = 0 } = {}) {
   const storage = createStorage(dbPath);
 
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-      const match = url.pathname.match(/^\/(configs|secrets)\/([^/]+)$/);
+  const server = Bun.serve({
+    port,
+    async fetch(req) {
+      const { pathname, searchParams } = new URL(req.url);
 
-      if (!match) {
-        sendJson(res, 404, { error: 'Not Found' });
-        return;
-      }
-
-      const [, type, key] = match;
-      const decodedKey = decodeURIComponent(key);
-
-      if (req.method === 'GET') {
-        const value = await storage.get(type, decodedKey);
-
-        if (value === null) {
-          sendJson(res, 404, { error: 'Key not found' });
-          return;
+      try {
+        // GET /api/get?key=
+        if (pathname === "/api/get" && req.method === "GET") {
+          const key = searchParams.get("key");
+          if (!key) return json({ error: "key is required" }, 400);
+          const row = storage.get(key);
+          if (!row) return json({ error: "Key not found" }, 404);
+          return json({ key, value: row.value });
         }
 
-        sendJson(res, 200, { key: decodedKey, value });
-        return;
-      }
-
-      if (req.method === 'PUT') {
-        const body = await parseBody(req);
-
-        if (typeof body.value !== 'string') {
-          sendJson(res, 400, { error: 'value must be a string' });
-          return;
+        // GET /api/getall
+        if (pathname === "/api/getall" && req.method === "GET") {
+          return json(storage.getAll());
         }
 
-        await storage.set(type, decodedKey, body.value);
-        sendJson(res, 200, { key: decodedKey, value: body.value });
-        return;
-      }
+        // GET /api/prefix?prefix=
+        if (pathname === "/api/prefix" && req.method === "GET") {
+          const prefix = searchParams.get("prefix");
+          if (prefix === null) return json({ error: "prefix is required" }, 400);
+          return json(storage.getByPrefix(prefix));
+        }
 
-      sendJson(res, 405, { error: 'Method not allowed' });
-    } catch (err) {
-      const statusCode = err.message === 'Invalid JSON body' ? 400 : 500;
-      sendJson(res, statusCode, { error: err.message || 'Internal Server Error' });
-    }
+        // PUT /api/put  { key, value }
+        if (pathname === "/api/put" && req.method === "PUT") {
+          let body;
+          try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
+          const { key, value } = body ?? {};
+          if (typeof key !== "string" || !key) return json({ error: "key must be a non-empty string" }, 400);
+          if (typeof value !== "string") return json({ error: "value must be a string" }, 400);
+          storage.set(key, value);
+          return json({ key, value });
+        }
+
+        // PUT /api/putmany  [{ key, value }, ...]
+        if (pathname === "/api/putmany" && req.method === "PUT") {
+          let body;
+          try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
+          if (!Array.isArray(body)) return json({ error: "body must be an array" }, 400);
+          for (const item of body) {
+            if (typeof item.key !== "string" || !item.key) return json({ error: "each entry must have a non-empty string key" }, 400);
+            if (typeof item.value !== "string") return json({ error: "each entry must have a string value" }, 400);
+          }
+          storage.setMany(body);
+          return json({ count: body.length });
+        }
+
+        // DELETE /api/delete?key=
+        if (pathname === "/api/delete" && req.method === "DELETE") {
+          const key = searchParams.get("key");
+          if (!key) return json({ error: "key is required" }, 400);
+          const changes = storage.delete(key);
+          if (!changes) return json({ error: "Key not found" }, 404);
+          return json({ deleted: key });
+        }
+
+        // DELETE /api/deleteprefix?prefix=
+        if (pathname === "/api/deleteprefix" && req.method === "DELETE") {
+          const prefix = searchParams.get("prefix");
+          if (prefix === null) return json({ error: "prefix is required" }, 400);
+          const count = storage.deleteByPrefix(prefix);
+          return json({ deleted: count });
+        }
+
+        // DELETE /api/deleteall
+        if (pathname === "/api/deleteall" && req.method === "DELETE") {
+          const count = storage.deleteAll();
+          return json({ deleted: count });
+        }
+
+        return json({ error: "Not Found" }, 404);
+      } catch (err) {
+        return json({ error: err.message || "Internal Server Error" }, 500);
+      }
+    },
   });
 
   server.closeStorage = () => storage.close();
   return server;
 }
 
-module.exports = {
-  createServer,
-  createStorage
-};
-
-if (require.main === module) {
+if (import.meta.main) {
   const port = Number(process.env.PORT || 3000);
-  const dbPath = process.env.CONFIG_DB_PATH || 'config.db';
-  const server = createServer({ dbPath });
-
-  server.listen(port, () => {
-    console.log(`Config server listening on port ${port}`);
-  });
+  const dbPath = process.env.CONFIG_DB_PATH || "data/config.db";
+  const server = createServer({ dbPath, port });
+  console.log(`Config server listening on port ${server.port}`);
 }
