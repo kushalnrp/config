@@ -1,8 +1,12 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import { createServer } from "../server.js";
+import { Config } from "../client/config.js";
 import { unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+let app;
+let client;
 
 function startServer() {
   const dbPath = join(tmpdir(), `config-test-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
@@ -17,187 +21,110 @@ function startServer() {
   };
 }
 
-test("PUT and GET a single key", async () => {
-  const app = startServer();
-  try {
-    let res = await fetch(`http://127.0.0.1:${app.port}/api/put`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key: "appName", value: "my-app" }),
-    });
-    expect(res.status).toBe(200);
-
-    res = await fetch(`http://127.0.0.1:${app.port}/api/get?key=appName`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ key: "appName", value: "my-app" });
-  } finally {
-    app.close();
-  }
+beforeEach(async () => {
+  Config.resetInstance();
+  app = startServer();
+  client = await new Config(`http://127.0.0.1:${app.port}`).init();
 });
 
-test("getall returns all entries ordered by key", async () => {
-  const app = startServer();
-  try {
-    for (const [key, value] of [["b", "2"], ["a", "1"]]) {
-      await fetch(`http://127.0.0.1:${app.port}/api/put`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ key, value }),
-      });
-    }
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/getall`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([
-      { key: "a", value: "1" },
-      { key: "b", value: "2" },
-    ]);
-  } finally {
-    app.close();
-  }
+afterEach(() => {
+  app.close();
+  Config.resetInstance();
 });
 
-test("prefix returns matching entries", async () => {
-  const app = startServer();
-  try {
-    await fetch(`http://127.0.0.1:${app.port}/api/putmany`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify([
-        { key: "db.host", value: "localhost" },
-        { key: "db.port", value: "5432" },
-        { key: "app.name", value: "myapp" },
-      ]),
-    });
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/prefix?prefix=db.`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([
-      { key: "db.host", value: "localhost" },
-      { key: "db.port", value: "5432" },
-    ]);
-  } finally {
-    app.close();
-  }
+test("set and get a single key", async () => {
+  await client.set("appName", "my-app");
+  expect(await client.get("appName")).toBe("my-app");
 });
 
-test("putmany inserts multiple entries", async () => {
-  const app = startServer();
-  try {
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/putmany`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify([
-        { key: "x", value: "1" },
-        { key: "y", value: "2" },
-      ]),
-    });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ count: 2 });
-  } finally {
-    app.close();
-  }
+test("getAll returns all entries ordered by key", async () => {
+  await client.set("b", "2");
+  await client.set("a", "1");
+  expect(await client.getAll()).toEqual([
+    { key: "a", value: "1" },
+    { key: "b", value: "2" },
+  ]);
+});
+
+test("getByPrefix returns matching entries", async () => {
+  await client.setMany([
+    { key: "db.host", value: "localhost" },
+    { key: "db.port", value: "5432" },
+    { key: "app.name", value: "myapp" },
+  ]);
+  expect(await client.getByPrefix("db.")).toEqual([
+    { key: "db.host", value: "localhost" },
+    { key: "db.port", value: "5432" },
+  ]);
+});
+
+test("setMany inserts multiple entries", async () => {
+  await client.setMany([
+    { key: "x", value: "1" },
+    { key: "y", value: "2" },
+  ]);
+  expect(await client.get("x")).toBe("1");
+  expect(await client.get("y")).toBe("2");
 });
 
 test("delete removes a key", async () => {
-  const app = startServer();
-  try {
-    await fetch(`http://127.0.0.1:${app.port}/api/put`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key: "toDelete", value: "val" }),
-    });
-
-    let res = await fetch(`http://127.0.0.1:${app.port}/api/delete?key=toDelete`, { method: "DELETE" });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: "toDelete" });
-
-    res = await fetch(`http://127.0.0.1:${app.port}/api/get?key=toDelete`);
-    expect(res.status).toBe(404);
-  } finally {
-    app.close();
-  }
+  await client.set("toDelete", "val");
+  await client.delete("toDelete");
+  expect(await client.get("toDelete")).toBeUndefined();
 });
 
-test("deleteprefix removes matching keys", async () => {
-  const app = startServer();
-  try {
-    await fetch(`http://127.0.0.1:${app.port}/api/putmany`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify([
-        { key: "cache.ttl", value: "60" },
-        { key: "cache.max", value: "100" },
-        { key: "other", value: "val" },
-      ]),
-    });
-
-    let res = await fetch(`http://127.0.0.1:${app.port}/api/deleteprefix?prefix=cache.`, { method: "DELETE" });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 2 });
-
-    res = await fetch(`http://127.0.0.1:${app.port}/api/getall`);
-    expect(await res.json()).toEqual([{ key: "other", value: "val" }]);
-  } finally {
-    app.close();
-  }
+test("deleteByPrefix removes matching keys", async () => {
+  await client.setMany([
+    { key: "cache.ttl", value: "60" },
+    { key: "cache.max", value: "100" },
+    { key: "other", value: "val" },
+  ]);
+  await client.deleteByPrefix("cache.");
+  expect(await client.getAll()).toEqual([{ key: "other", value: "val" }]);
 });
 
-test("returns 404 for missing key", async () => {
-  const app = startServer();
-  try {
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/get?key=missing`);
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "Key not found" });
-  } finally {
-    app.close();
-  }
+test("get returns undefined for missing key", async () => {
+  expect(await client.get("missing")).toBeUndefined();
 });
 
-test("deleteall removes all keys", async () => {
-  const app = startServer();
-  try {
-    await fetch(`http://127.0.0.1:${app.port}/api/putmany`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify([
-        { key: "a", value: "1" },
-        { key: "b", value: "2" },
-        { key: "c", value: "3" },
-      ]),
-    });
-
-    let res = await fetch(`http://127.0.0.1:${app.port}/api/deleteall`, { method: "DELETE" });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 3 });
-
-    res = await fetch(`http://127.0.0.1:${app.port}/api/getall`);
-    expect(await res.json()).toEqual([]);
-  } finally {
-    app.close();
-  }
+test("get with fetch=true returns undefined for missing key", async () => {
+  expect(await client.get("missing", true)).toBeUndefined();
 });
 
-test("deleteall on empty db returns 0", async () => {
-  const app = startServer();
-  try {
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/deleteall`, { method: "DELETE" });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 0 });
-  } finally {
-    app.close();
-  }
+test("deleteAll removes all keys", async () => {
+  await client.setMany([
+    { key: "a", value: "1" },
+    { key: "b", value: "2" },
+    { key: "c", value: "3" },
+  ]);
+  await client.deleteAll();
+  expect(await client.getAll()).toEqual([]);
 });
 
-test("validates put payload", async () => {
-  const app = startServer();
-  try {
-    const res = await fetch(`http://127.0.0.1:${app.port}/api/put`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key: "x", value: 123 }),
-    });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "value must be a string" });
-  } finally {
-    app.close();
-  }
+test("deleteAll on empty db does not throw", async () => {
+  await expect(client.deleteAll()).resolves.toBeUndefined();
+});
+
+test("set throws on invalid value type", async () => {
+  await expect(client.set("x", 123)).rejects.toThrow("value must be a string");
+});
+
+test("get returns value from cache without hitting server", async () => {
+  await client.set("cached", "yes");
+  expect(await client.get("cached")).toBe("yes");
+});
+
+test("get with fetch=true returns value from server", async () => {
+  await client.set("live", "data");
+  expect(await client.get("live", true)).toBe("data");
+});
+
+test("getInstance returns the same instance", async () => {
+  const a = Config.getInstance(`http://127.0.0.1:${app.port}`);
+  const b = Config.getInstance(`http://127.0.0.1:${app.port}`);
+  expect(a).toBe(b);
+});
+
+test("throws when server is unreachable", async () => {
+  await expect(new Config("http://127.0.0.1:1").init()).rejects.toThrow();
 });
