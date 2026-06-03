@@ -1,34 +1,80 @@
-import { test, expect, beforeEach, afterEach } from "bun:test";
-import { createServer } from "../server.js";
+/**
+ * Integration tests for the Go config server binary.
+ * Same scenarios as server.test.js — fresh server per test for isolation.
+ *
+ * Prerequisites:
+ *   cd /Users/kushals/personal/dist1/config
+ *   go build -o config-server .
+ *
+ * Run:
+ *   npm test
+ */
+
+import { test, expect, beforeEach, afterEach } from "vitest";
 import { Config } from "../client/config.js";
-import { unlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, unlinkSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { createServer as netCreate } from "node:net";
+import { spawn } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const BINARY = join(__dirname, "../config-server");
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const s = netCreate();
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+    s.on("error", reject);
+  });
+}
+
+async function waitReady(port, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`);
+      if (r.ok) return;
+    } catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 50));
+  }
+  throw new Error(`Go server did not start on port ${port} within ${timeoutMs}ms`);
+}
+
+async function startGoServer() {
+  if (!existsSync(BINARY)) {
+    throw new Error(
+      `Go binary not found at ${BINARY}. Run: cd ${join(__dirname, "..")} && go build -o config-server .`
+    );
+  }
+  const port = await getFreePort();
+  const dbPath = join(tmpdir(), `config-go-test-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
+  const proc = spawn(BINARY, [], {
+    env: { ...process.env, CONFIG_PORT: String(port), CONFIG_DB_PATH: dbPath },
+    stdio: "ignore",
+  });
+  proc.on("error", err => { throw new Error(`Failed to start Go server: ${err.message}`); });
+  await waitReady(port);
+  return { port, proc, dbPath };
+}
 
 let app;
 let client;
 
-function startServer() {
-  const dbPath = join(tmpdir(), `config-test-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
-  const server = createServer({ dbPath });
-  return {
-    port: server.port,
-    close() {
-      server.closeStorage();
-      server.stop(true);
-      if (existsSync(dbPath)) unlinkSync(dbPath);
-    },
-  };
-}
-
 beforeEach(async () => {
   Config.resetInstance();
-  app = startServer();
-  client = await new Config(`http://127.0.0.1:${app.port}`).init();
+  app = await startGoServer();
+  client = await new Config(`http://127.0.0.1:${app.port}`).init(0);
 });
 
 afterEach(() => {
-  app.close();
+  client.close();
+  app.proc.kill("SIGTERM");
+  if (existsSync(app.dbPath)) unlinkSync(app.dbPath);
   Config.resetInstance();
 });
 
@@ -46,63 +92,23 @@ test("getAll returns all entries ordered by key", async () => {
   ]);
 });
 
-test("getByPrefix returns matching entries", async () => {
-  await client.setMany([
-    { key: "db.host", value: "localhost" },
-    { key: "db.port", value: "5432" },
-    { key: "app.name", value: "myapp" },
-  ]);
-  expect(await client.getByPrefix("db.")).toEqual([
-    { key: "db.host", value: "localhost" },
-    { key: "db.port", value: "5432" },
-  ]);
-});
-
-test("setMany inserts multiple entries", async () => {
-  await client.setMany([
-    { key: "x", value: "1" },
-    { key: "y", value: "2" },
-  ]);
-  expect(await client.get("x")).toBe("1");
-  expect(await client.get("y")).toBe("2");
-});
-
 test("delete removes a key", async () => {
   await client.set("toDelete", "val");
   await client.delete("toDelete");
   expect(await client.get("toDelete")).toBeUndefined();
 });
 
-test("deleteByPrefix removes matching keys", async () => {
-  await client.setMany([
-    { key: "cache.ttl", value: "60" },
-    { key: "cache.max", value: "100" },
-    { key: "other", value: "val" },
-  ]);
-  await client.deleteByPrefix("cache.");
-  expect(await client.getAll()).toEqual([{ key: "other", value: "val" }]);
-});
-
 test("get returns undefined for missing key", async () => {
   expect(await client.get("missing")).toBeUndefined();
 });
 
-test("get with fetch=true returns undefined for missing key", async () => {
-  expect(await client.get("missing", true)).toBeUndefined();
-});
-
-test("deleteAll removes all keys", async () => {
-  await client.setMany([
-    { key: "a", value: "1" },
-    { key: "b", value: "2" },
-    { key: "c", value: "3" },
-  ]);
-  await client.deleteAll();
-  expect(await client.getAll()).toEqual([]);
-});
-
-test("deleteAll on empty db does not throw", async () => {
-  await expect(client.deleteAll()).resolves.toBeUndefined();
+test("get lazily fetches a key not in local cache", async () => {
+  await fetch(`http://127.0.0.1:${app.port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "lazy", value: "loaded" }),
+  });
+  expect(await client.get("lazy")).toBe("loaded");
 });
 
 test("set throws on invalid value type", async () => {
@@ -114,11 +120,6 @@ test("get returns value from cache without hitting server", async () => {
   expect(await client.get("cached")).toBe("yes");
 });
 
-test("get with fetch=true returns value from server", async () => {
-  await client.set("live", "data");
-  expect(await client.get("live", true)).toBe("data");
-});
-
 test("getInstance returns the same instance", async () => {
   const a = Config.getInstance(`http://127.0.0.1:${app.port}`);
   const b = Config.getInstance(`http://127.0.0.1:${app.port}`);
@@ -126,5 +127,11 @@ test("getInstance returns the same instance", async () => {
 });
 
 test("throws when server is unreachable", async () => {
-  await expect(new Config("http://127.0.0.1:1").init()).rejects.toThrow();
+  await expect(new Config("http://127.0.0.1:1").init(0)).rejects.toThrow();
+});
+
+test("GET /health returns 200 ok", async () => {
+  const r = await fetch(`http://127.0.0.1:${app.port}/health`);
+  expect(r.status).toBe(200);
+  expect(await r.json()).toEqual({ status: "ok" });
 });

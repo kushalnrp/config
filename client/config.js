@@ -3,6 +3,7 @@ let instance = null;
 export class Config {
   #url;
   #cache = new Map();
+  #reloadTimer = null;
 
   constructor(url) {
     if (!url) throw new Error("url is required");
@@ -15,12 +16,26 @@ export class Config {
   }
 
   static resetInstance() {
+    instance?.close();
     instance = null;
   }
 
-  async init() {
+  /**
+   * Connect to the server, seed the local cache, and start periodic reload.
+   * Pass reloadIntervalMs = 0 to disable the background reload (useful in tests).
+   */
+  async init(reloadIntervalMs = 10_000) {
     await this.#syncCache();
+    if (reloadIntervalMs > 0) {
+      this.#reloadTimer = setInterval(() => this.#syncCache(), reloadIntervalMs);
+    }
     return this;
+  }
+
+  /** Stop the periodic reload. Call when the client is no longer needed. */
+  close() {
+    clearInterval(this.#reloadTimer);
+    this.#reloadTimer = null;
   }
 
   // ── private ────────────────────────────────────────────────────────────────
@@ -50,58 +65,39 @@ export class Config {
 
   // ── read ───────────────────────────────────────────────────────────────────
 
-  async get(key, fetch = false) {
-    if (fetch) {
-      const body = await this.#request(`/api/get?key=${encodeURIComponent(key)}`).catch((err) => {
-        if (err.message === "Key not found") return null;
-        throw err;
-      });
-      return body ? body.value : undefined;
-    }
-    const val = this.#cache.get(key);
-    return val !== undefined ? val : undefined;
+  /**
+   * Return the value for key.
+   * Checks the local cache first; if the key is absent, fetches it from the
+   * server once and stores it so future reads stay local.
+   */
+  async get(key) {
+    if (this.#cache.has(key)) return this.#cache.get(key);
+    const body = await this.#request(`/api/get?key=${encodeURIComponent(key)}`).catch((err) => {
+      if (err.message === "Key not found") return null;
+      throw err;
+    });
+    if (body) this.#cache.set(key, body.value);
+    return body?.value;
   }
 
   async getAll() {
-    return await this.#request("/api/getall");
-  }
-
-  async getByPrefix(prefix) {
-    return await this.#request(`/api/prefix?prefix=${encodeURIComponent(prefix)}`);
+    return this.#request("/api/getall");
   }
 
   // ── write ──────────────────────────────────────────────────────────────────
 
   async set(key, value) {
+    if (typeof value !== "string") throw new Error("value must be a string");
     await this.#request("/api/put", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ key, value }),
     });
-    await this.#syncCache();
-  }
-
-  async setMany(entries) {
-    await this.#request("/api/putmany", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(entries),
-    });
-    await this.#syncCache();
+    this.#cache.set(key, value);
   }
 
   async delete(key) {
     await this.#request(`/api/delete?key=${encodeURIComponent(key)}`, { method: "DELETE" });
-    await this.#syncCache();
-  }
-
-  async deleteByPrefix(prefix) {
-    await this.#request(`/api/deleteprefix?prefix=${encodeURIComponent(prefix)}`, { method: "DELETE" });
-    await this.#syncCache();
-  }
-
-  async deleteAll() {
-    await this.#request("/api/deleteall", { method: "DELETE" });
-    await this.#syncCache();
+    this.#cache.delete(key);
   }
 }

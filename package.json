@@ -1,23 +1,14 @@
 {
   "name": "config",
   "version": "1.0.0",
-  "description": "Bun server for key-value config storage backed by SQLite",
-  "main": "server.js",
+  "description": "Go key-value config server with JS and Go clients",
   "type": "module",
   "scripts": {
-    "test": "bun test",
-    "start": "bun server.js",
-    "build": "bun build --compile --outfile config-server server.js"
+    "build": "go build -o config-server .",
+    "test": "node test/run.js",
+    "setup": "npm run build && npm test"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/kushalnrp/config.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/kushalnrp/config/issues"
-  },
-  "homepage": "https://github.com/kushalnrp/config#readme"
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

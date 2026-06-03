@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 type entry struct {
@@ -19,10 +21,13 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+// Client talks to the config server and keeps a local in-memory cache.
+// Call Init once at startup; use Get/Set/Delete from any goroutine.
 type Client struct {
 	baseURL string
 	mu      sync.RWMutex
 	cache   map[string]string
+	stop    chan struct{}
 }
 
 var (
@@ -30,17 +35,23 @@ var (
 	once     sync.Once
 )
 
-// Init creates the singleton client, loads the cache, and must be called before Get/Set/etc.
-func Init(baseURL string) (*Client, error) {
+// Init creates the singleton client, seeds the local cache from the server,
+// and starts a background goroutine that reloads all keys every reloadInterval.
+// Pass 0 to disable the background reload.
+func Init(baseURL string, reloadInterval time.Duration) (*Client, error) {
 	var initErr error
 	once.Do(func() {
 		c := &Client{
 			baseURL: strings.TrimRight(baseURL, "/"),
 			cache:   make(map[string]string),
+			stop:    make(chan struct{}),
 		}
 		if err := c.syncCache(); err != nil {
 			initErr = err
 			return
+		}
+		if reloadInterval > 0 {
+			go c.reloadLoop(reloadInterval)
 		}
 		instance = c
 	})
@@ -58,7 +69,35 @@ func GetInstance() *Client {
 	return instance
 }
 
+// Close stops the background reload goroutine.
+func (c *Client) Close() {
+	close(c.stop)
+}
+
+// ResetInstance stops any background reload and clears the singleton.
+// Intended for tests.
+func ResetInstance() {
+	if instance != nil {
+		instance.Close()
+		instance = nil
+	}
+	once = sync.Once{}
+}
+
 // ── private ───────────────────────────────────────────────────────────────────
+
+func (c *Client) reloadLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			_ = c.syncCache()
+		case <-c.stop:
+			return
+		}
+	}
+}
 
 func (c *Client) do(method, path string, reqBody any) ([]byte, error) {
 	var bodyReader io.Reader
@@ -67,7 +106,7 @@ func (c *Client) do(method, path string, reqBody any) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("config: marshal request: %w", err)
 		}
-		bodyReader = strings.NewReader(string(b))
+		bodyReader = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
@@ -86,14 +125,13 @@ func (c *Client) do(method, path string, reqBody any) ([]byte, error) {
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("config: read response body: %w", err)
+		return nil, fmt.Errorf("config: read response: %w", err)
 	}
-
 	if resp.StatusCode >= 400 {
-		var errResp errorResponse
-		_ = json.Unmarshal(data, &errResp)
-		if errResp.Error != "" {
-			return nil, fmt.Errorf("config: %s", errResp.Error)
+		var e errorResponse
+		_ = json.Unmarshal(data, &e)
+		if e.Error != "" {
+			return nil, fmt.Errorf("config: %s", e.Error)
 		}
 		return nil, fmt.Errorf("config: request failed with status %d", resp.StatusCode)
 	}
@@ -120,31 +158,33 @@ func (c *Client) syncCache() error {
 
 // ── read ──────────────────────────────────────────────────────────────────────
 
-// Get returns the cached value for key, or nil if not found.
-// If forceFetch is true, the server is queried directly.
-func (c *Client) Get(key string, forceFetch bool) (*string, error) {
-	if !forceFetch {
-		c.mu.RLock()
-		val, ok := c.cache[key]
-		c.mu.RUnlock()
-		if !ok {
-			return nil, nil
-		}
-		return &val, nil
+// Get returns the value for key.
+// Checks the local cache first; if the key is absent, fetches it from the
+// server once and stores it so future reads stay local.
+// Returns ("", false) when the key does not exist.
+func (c *Client) Get(key string) (string, bool, error) {
+	c.mu.RLock()
+	val, ok := c.cache[key]
+	c.mu.RUnlock()
+	if ok {
+		return val, true, nil
 	}
 
 	data, err := c.do("GET", "/api/get?key="+url.QueryEscape(key), nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "Key not found") {
-			return nil, nil
+			return "", false, nil
 		}
-		return nil, err
+		return "", false, err
 	}
 	var e entry
 	if err := json.Unmarshal(data, &e); err != nil {
-		return nil, fmt.Errorf("config: parse get response: %w", err)
+		return "", false, fmt.Errorf("config: parse get response: %w", err)
 	}
-	return &e.Value, nil
+	c.mu.Lock()
+	c.cache[key] = e.Value
+	c.mu.Unlock()
+	return e.Value, true, nil
 }
 
 // GetAll returns all entries from the server.
@@ -160,62 +200,28 @@ func (c *Client) GetAll() ([]entry, error) {
 	return entries, nil
 }
 
-// GetByPrefix returns all entries whose key starts with prefix.
-func (c *Client) GetByPrefix(prefix string) ([]entry, error) {
-	data, err := c.do("GET", "/api/prefix?prefix="+url.QueryEscape(prefix), nil)
-	if err != nil {
-		return nil, err
-	}
-	var entries []entry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("config: parse prefix response: %w", err)
-	}
-	return entries, nil
-}
-
 // ── write ─────────────────────────────────────────────────────────────────────
 
-// Set creates or updates a key, then resyncs the cache.
+// Set creates or updates a key and updates the local cache directly.
 func (c *Client) Set(key, value string) error {
 	_, err := c.do("PUT", "/api/put", map[string]string{"key": key, "value": value})
 	if err != nil {
 		return err
 	}
-	return c.syncCache()
+	c.mu.Lock()
+	c.cache[key] = value
+	c.mu.Unlock()
+	return nil
 }
 
-// SetMany creates or updates multiple entries, then resyncs the cache.
-func (c *Client) SetMany(entries []entry) error {
-	_, err := c.do("PUT", "/api/putmany", entries)
-	if err != nil {
-		return err
-	}
-	return c.syncCache()
-}
-
-// Delete removes a key, then resyncs the cache.
+// Delete removes a key and evicts it from the local cache.
 func (c *Client) Delete(key string) error {
 	_, err := c.do("DELETE", "/api/delete?key="+url.QueryEscape(key), nil)
 	if err != nil {
 		return err
 	}
-	return c.syncCache()
-}
-
-// DeleteByPrefix removes all keys with the given prefix, then resyncs the cache.
-func (c *Client) DeleteByPrefix(prefix string) error {
-	_, err := c.do("DELETE", "/api/deleteprefix?prefix="+url.QueryEscape(prefix), nil)
-	if err != nil {
-		return err
-	}
-	return c.syncCache()
-}
-
-// DeleteAll removes all entries, then resyncs the cache.
-func (c *Client) DeleteAll() error {
-	_, err := c.do("DELETE", "/api/deleteall", nil)
-	if err != nil {
-		return err
-	}
-	return c.syncCache()
+	c.mu.Lock()
+	delete(c.cache, key)
+	c.mu.Unlock()
+	return nil
 }
