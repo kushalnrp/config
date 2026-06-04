@@ -2,17 +2,19 @@ let instance = null;
 
 export class Config {
   #url;
+  #apiKey;
   #cache = new Map();
   #reloadTimer = null;
   #natsSub = null;
 
-  constructor(url) {
+  constructor(url, apiKey = "") {
     if (!url) throw new Error("url is required");
     this.#url = url.replace(/\/$/, "");
+    this.#apiKey = apiKey;
   }
 
-  static getInstance(url) {
-    if (!instance) instance = new Config(url);
+  static getInstance(url, apiKey = "") {
+    if (!instance) instance = new Config(url, apiKey);
     return instance;
   }
 
@@ -78,6 +80,9 @@ export class Config {
   // ── private ────────────────────────────────────────────────────────────────
 
   async #request(path, options = {}) {
+    if (this.#apiKey) {
+      options = { ...options, headers: { ...options.headers, "X-API-Key": this.#apiKey } };
+    }
     let res;
     try {
       res = await fetch(`${this.#url}${path}`, options);
