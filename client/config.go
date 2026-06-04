@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"log"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 type entry struct {
@@ -21,6 +24,33 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+type clientOptions struct {
+	reloadInterval time.Duration
+	natsURL        string
+	natsUser       string
+	natsPass       string
+}
+
+// Option configures the Client.
+type Option func(*clientOptions)
+
+// WithReloadInterval overrides the fallback poll interval (default 5 min).
+// Pass 0 to disable polling (only useful when NATS is configured).
+func WithReloadInterval(d time.Duration) Option {
+	return func(o *clientOptions) { o.reloadInterval = d }
+}
+
+// WithNATS subscribes to config.updated on the given NATS server so the cache
+// is refreshed immediately whenever a key is written or deleted.
+// user and pass may be empty for unauthenticated servers.
+func WithNATS(natsURL, user, pass string) Option {
+	return func(o *clientOptions) {
+		o.natsURL = natsURL
+		o.natsUser = user
+		o.natsPass = pass
+	}
+}
+
 // Client talks to the config server and keeps a local in-memory cache.
 // Call Init once at startup; use Get/Set/Delete from any goroutine.
 type Client struct {
@@ -28,6 +58,8 @@ type Client struct {
 	mu      sync.RWMutex
 	cache   map[string]string
 	stop    chan struct{}
+	nc      *nats.Conn
+	sub     *nats.Subscription
 }
 
 var (
@@ -36,9 +68,14 @@ var (
 )
 
 // Init creates the singleton client, seeds the local cache from the server,
-// and starts a background goroutine that reloads all keys every reloadInterval.
-// Pass 0 to disable the background reload.
-func Init(baseURL string, reloadInterval time.Duration) (*Client, error) {
+// and starts a background poll (default 5 min) plus an optional NATS subscription
+// for immediate cache refresh on any config.updated message.
+func Init(baseURL string, opts ...Option) (*Client, error) {
+	o := &clientOptions{reloadInterval: 5 * time.Minute}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	var initErr error
 	once.Do(func() {
 		c := &Client{
@@ -46,13 +83,62 @@ func Init(baseURL string, reloadInterval time.Duration) (*Client, error) {
 			cache:   make(map[string]string),
 			stop:    make(chan struct{}),
 		}
+
 		if err := c.syncCache(); err != nil {
 			initErr = err
 			return
 		}
-		if reloadInterval > 0 {
-			go c.reloadLoop(reloadInterval)
+
+		// NATS subscription for push-based cache refresh.
+		if o.natsURL != "" {
+			natsopts := []nats.Option{
+				nats.MaxReconnects(-1),
+				nats.ReconnectWait(2 * time.Second),
+				nats.ConnectHandler(func(nc *nats.Conn) {
+					log.Printf("[config] NATS connected: %s", nc.ConnectedUrl())
+				}),
+				nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+					if err != nil {
+						log.Printf("[config] NATS disconnected: %v", err)
+					} else {
+						log.Printf("[config] NATS disconnected")
+					}
+				}),
+				nats.ReconnectHandler(func(nc *nats.Conn) {
+					log.Printf("[config] NATS reconnected: %s", nc.ConnectedUrl())
+				}),
+				nats.ClosedHandler(func(_ *nats.Conn) {
+					log.Printf("[config] NATS connection closed")
+				}),
+				nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+					log.Printf("[config] NATS error: %v", err)
+				}),
+			}
+			if o.natsUser != "" {
+				natsopts = append(natsopts, nats.UserInfo(o.natsUser, o.natsPass))
+			}
+			nc, err := nats.Connect(o.natsURL, natsopts...)
+			if err != nil {
+				log.Printf("[config] NATS connect failed, using poll-only mode: %v", err)
+			} else {
+				c.nc = nc
+				sub, err := nc.Subscribe("config.updated", func(msg *nats.Msg) {
+					log.Printf("[config] NATS: config.updated received (key=%s), reloading cache", string(msg.Data))
+					_ = c.syncCache()
+				})
+				if err != nil {
+					log.Printf("[config] NATS subscribe failed: %v", err)
+				} else {
+					c.sub = sub
+				}
+			}
 		}
+
+		// Fallback poll.
+		if o.reloadInterval > 0 {
+			go c.reloadLoop(o.reloadInterval)
+		}
+
 		instance = c
 	})
 	if initErr != nil {
@@ -69,9 +155,15 @@ func GetInstance() *Client {
 	return instance
 }
 
-// Close stops the background reload goroutine.
+// Close stops the background poll and drains the NATS connection.
 func (c *Client) Close() {
 	close(c.stop)
+	if c.sub != nil {
+		_ = c.sub.Unsubscribe()
+	}
+	if c.nc != nil {
+		c.nc.Drain() //nolint:errcheck
+	}
 }
 
 // ResetInstance stops any background reload and clears the singleton.
@@ -92,7 +184,10 @@ func (c *Client) reloadLoop(interval time.Duration) {
 	for {
 		select {
 		case <-t.C:
-			_ = c.syncCache()
+			log.Printf("[config] poll: reloading cache")
+			if err := c.syncCache(); err != nil {
+				log.Printf("[config] poll: reload failed: %v", err)
+			}
 		case <-c.stop:
 			return
 		}
@@ -159,9 +254,8 @@ func (c *Client) syncCache() error {
 // ── read ──────────────────────────────────────────────────────────────────────
 
 // Get returns the value for key.
-// Checks the local cache first; if the key is absent, fetches it from the
-// server once and stores it so future reads stay local.
-// Returns ("", false) when the key does not exist.
+// Checks the local cache first; if absent, fetches from the server once and caches it.
+// Returns ("", false, nil) when the key does not exist.
 func (c *Client) Get(key string) (string, bool, error) {
 	c.mu.RLock()
 	val, ok := c.cache[key]

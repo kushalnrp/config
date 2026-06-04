@@ -4,6 +4,7 @@ export class Config {
   #url;
   #cache = new Map();
   #reloadTimer = null;
+  #natsSub = null;
 
   constructor(url) {
     if (!url) throw new Error("url is required");
@@ -21,21 +22,57 @@ export class Config {
   }
 
   /**
-   * Connect to the server, seed the local cache, and start periodic reload.
-   * Pass reloadIntervalMs = 0 to disable the background reload (useful in tests).
+   * Seed the local cache and start keeping it fresh.
+   *
+   * @param {object} [opts]
+   * @param {number}  [opts.reloadIntervalMs=300_000] Fallback poll interval (0 = disabled).
+   * @param {object}  [opts.nats] Connected nats.js connection. When provided, subscribes to
+   *                              config.updated for immediate cache refresh on writes.
    */
-  async init(reloadIntervalMs = 10_000) {
+  async init({ reloadIntervalMs = 300_000, nats } = {}) {
     await this.#syncCache();
-    if (reloadIntervalMs > 0) {
-      this.#reloadTimer = setInterval(() => this.#syncCache(), reloadIntervalMs);
+
+    if (nats) {
+      // Log connection lifecycle events.
+      (async () => {
+        for await (const s of nats.status()) {
+          console.log(`[config] NATS status: ${s.type}${s.data ? ` — ${JSON.stringify(s.data)}` : ""}`);
+        }
+      })();
+      nats.closed().then(() => console.log("[config] NATS connection closed"));
+
+      const sub = nats.subscribe("config.updated");
+      this.#natsSub = sub;
+      // consume messages in the background — each triggers a full reload
+      (async () => {
+        for await (const msg of sub) {
+          const key = msg.string();
+          console.log(`[config] NATS: config.updated received (key=${key}), reloading cache`);
+          await this.#syncCache().catch((err) =>
+            console.error("[config] NATS-triggered reload failed:", err)
+          );
+        }
+      })();
     }
+
+    if (reloadIntervalMs > 0) {
+      this.#reloadTimer = setInterval(async () => {
+        console.log("[config] poll: reloading cache");
+        await this.#syncCache().catch((err) =>
+          console.error("[config] poll: reload failed:", err)
+        );
+      }, reloadIntervalMs);
+    }
+
     return this;
   }
 
-  /** Stop the periodic reload. Call when the client is no longer needed. */
+  /** Stop the periodic reload and unsubscribe from NATS. */
   close() {
     clearInterval(this.#reloadTimer);
     this.#reloadTimer = null;
+    this.#natsSub?.unsubscribe();
+    this.#natsSub = null;
   }
 
   // ── private ────────────────────────────────────────────────────────────────
@@ -67,8 +104,7 @@ export class Config {
 
   /**
    * Return the value for key.
-   * Checks the local cache first; if the key is absent, fetches it from the
-   * server once and stores it so future reads stay local.
+   * Checks the local cache first; if absent, fetches from the server once and caches it.
    */
   async get(key) {
     if (this.#cache.has(key)) return this.#cache.get(key);

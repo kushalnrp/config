@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -30,7 +33,25 @@ func main() {
 		log.Fatalf("failed to seed from %s: %v", seedPath, err)
 	}
 
-	handler := buildHandler(storage, apiKey)
+	var nc *nats.Conn
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		opts := []nats.Option{
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(2 * time.Second),
+		}
+		if u := os.Getenv("NATS_USER"); u != "" {
+			opts = append(opts, nats.UserInfo(u, os.Getenv("NATS_PASS")))
+		}
+		var err error
+		nc, err = nats.Connect(natsURL, opts...)
+		if err != nil {
+			log.Fatalf("failed to connect to NATS: %v", err)
+		}
+		defer nc.Drain()
+		log.Printf("Connected to NATS at %s", natsURL)
+	}
+
+	handler := buildHandler(storage, apiKey, nc)
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Config server listening on port %d", port)
@@ -40,14 +61,14 @@ func main() {
 }
 
 // buildHandler wires up all routes and middleware.
-func buildHandler(storage *Storage, apiKey string) http.Handler {
+func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
 	mux := http.NewServeMux()
 
 	// /health is always unauthenticated.
 	mux.HandleFunc("/health", handleHealth)
 
 	// All /api/* routes go through the apiHandler, optionally wrapped in auth.
-	var apiH http.Handler = &apiHandler{storage: storage}
+	var apiH http.Handler = &apiHandler{storage: storage, nc: nc}
 	if apiKey != "" {
 		apiH = authMiddleware(apiKey, apiH)
 	}

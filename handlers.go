@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+
+	"github.com/nats-io/nats.go"
 )
 
 // writeJSON encodes data as JSON and writes it with the given status code.
@@ -24,6 +27,17 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 // apiHandler routes all /api/* requests.
 type apiHandler struct {
 	storage *Storage
+	nc      *nats.Conn
+}
+
+// publish sends a config.updated notification. No-op if NATS is not configured.
+func (h *apiHandler) publish(key string) {
+	if h.nc == nil {
+		return
+	}
+	if err := h.nc.Publish("config.updated", []byte(key)); err != nil {
+		log.Printf("NATS publish error: %v", err)
+	}
 }
 
 func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +96,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, Entry{Key: key, Value: value})
+		h.publish(key)
 
 	// DELETE /api/delete?key=
 	case path == "/api/delete" && r.Method == http.MethodDelete:
@@ -100,6 +115,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"deleted": key})
+		h.publish(key)
 
 	default:
 		errJSON(w, http.StatusNotFound, "Not Found")
