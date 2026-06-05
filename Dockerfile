@@ -24,8 +24,6 @@ RUN mkdir -p data
 ENV CONFIG_PORT=2001
 ENV CONFIG_DB_PATH=data/config.db
 ENV CONFIG_SEED_PATH=config.json
-# ENV API_KEY=changeme
-
 EXPOSE 2001
 
 CMD ["./config-server"]
