@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/nats-io/nats.go"
@@ -36,7 +36,7 @@ func (h *apiHandler) publish(key string) {
 		return
 	}
 	if err := h.nc.Publish("config.updated", []byte(key)); err != nil {
-		log.Printf("NATS publish error: %v", err)
+		slog.Error("NATS publish error", "error", err)
 	}
 }
 

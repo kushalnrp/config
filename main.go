@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -13,10 +13,13 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})).With("service", "config"))
+
 	portStr := getEnv("CONFIG_PORT", "2001")
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("invalid CONFIG_PORT %q: %v", portStr, err)
+		slog.Error("invalid CONFIG_PORT", "value", portStr, "error", err)
+		os.Exit(1)
 	}
 
 	dbPath := getEnv("CONFIG_DB_PATH", "data/config.db")
@@ -24,13 +27,15 @@ func main() {
 
 	storage, err := newStorage(dbPath)
 	if err != nil {
-		log.Fatalf("failed to open storage: %v", err)
+		slog.Error("failed to open storage", "error", err)
+		os.Exit(1)
 	}
 	defer storage.close()
 
 	seedPath := os.Getenv("CONFIG_SEED_PATH")
 	if err := seedFromFile(storage, seedPath); err != nil {
-		log.Fatalf("failed to seed from %s: %v", seedPath, err)
+		slog.Error("failed to seed", "path", seedPath, "error", err)
+		os.Exit(1)
 	}
 
 	var nc *nats.Conn
@@ -45,18 +50,20 @@ func main() {
 		var err error
 		nc, err = nats.Connect(natsURL, opts...)
 		if err != nil {
-			log.Fatalf("failed to connect to NATS: %v", err)
+			slog.Error("failed to connect to NATS", "url", natsURL, "error", err)
+			os.Exit(1)
 		}
 		defer nc.Drain()
-		log.Printf("Connected to NATS at %s", natsURL)
+		slog.Info("connected to NATS", "url", natsURL)
 	}
 
 	handler := buildHandler(storage, apiKey, nc)
 
 	addr := fmt.Sprintf(":%d", port)
-	log.Printf("Config server listening on port %d", port)
+	slog.Info("config server listening", "port", port)
 	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("server error: %v", err)
+		slog.Error("server error", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -121,7 +128,7 @@ func seedFromFile(s *Storage, path string) error {
 	if err := s.setMany(entries); err != nil {
 		return fmt.Errorf("write seed entries: %w", err)
 	}
-	log.Printf("Seeded %d entries from %s", len(entries), path)
+	slog.Info("seeded entries", "count", len(entries), "path", path)
 	return nil
 }
 
