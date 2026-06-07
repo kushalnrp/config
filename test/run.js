@@ -5,16 +5,16 @@
  * then reports results.
  */
 
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
-import { createServer as netCreate } from "node:net";
-import { Config } from "../client/config.js";
+'use strict';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = dirname(__dirname);
+const { spawn, spawnSync } = require("node:child_process");
+const { existsSync, unlinkSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const { tmpdir } = require("node:os");
+const { createServer: netCreate } = require("node:net");
+const { Config } = require("../client/config.js");
+
+const PROJECT_ROOT = join(__dirname, "..");
 const BINARY = join(PROJECT_ROOT, "config-server");
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -110,14 +110,11 @@ test("get returns undefined for missing key", async (client) => {
 });
 
 test("get lazily fetches a key not in local cache", async (client) => {
-  // Write a key directly to the server, bypassing the client's cache
   await fetch(`http://127.0.0.1:${client._port}/api/put`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ key: "lazy", value: "loaded" }),
   });
-
-  // Client hasn't cached this key — get() should lazy-fetch it from the server
   assertEqual(await client.get("lazy"), "loaded");
 });
 
@@ -173,7 +170,6 @@ async function main() {
     console.log(`Using existing binary: ${BINARY}`);
   }
 
-  // Seed file used by the last two tests
   const seedFilePath = join(tmpdir(), `config-seed-${Date.now()}.json`);
   writeFileSync(seedFilePath, JSON.stringify({ "seed.key": "hello", "seed.other": "world" }));
 
@@ -191,7 +187,7 @@ async function main() {
         server = await startServer(isSeedTest ? { CONFIG_SEED_PATH: seedFilePath } : {});
         Config.resetInstance();
         client = await new Config(`http://127.0.0.1:${server.port}`).init(0);
-        client._port = server.port; // expose port for the lazy-fetch test
+        client._port = server.port;
       }
 
       await t.fn(client);

@@ -10,16 +10,16 @@
  *   npm test
  */
 
-import { test, expect, beforeEach, afterEach } from "vitest";
-import { Config } from "../client/config.js";
-import { existsSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
-import { createServer as netCreate } from "node:net";
-import { spawn } from "node:child_process";
+'use strict';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const { test, expect, beforeEach, afterEach } = require("vitest");
+const { Config } = require("../client/config.js");
+const { existsSync, unlinkSync } = require("node:fs");
+const { join } = require("node:path");
+const { tmpdir } = require("node:os");
+const { createServer: netCreate } = require("node:net");
+const { spawn } = require("node:child_process");
+
 const BINARY = join(__dirname, "../config-server");
 
 function getFreePort() {

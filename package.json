@@ -2,7 +2,6 @@
   "name": "config",
   "version": "1.0.0",
   "description": "Go key-value config server with JS and Go clients",
-  "type": "module",
   "scripts": {
     "build": "go build -o config-server .",
     "test": "node test/run.js",
