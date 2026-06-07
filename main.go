@@ -67,12 +67,36 @@ func main() {
 	}
 }
 
+// statusWriter captures the HTTP status code written by a handler.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(status int) {
+	sw.status = status
+	sw.ResponseWriter.WriteHeader(status)
+}
+
+// loggingMiddleware logs method, path, status, and duration for every request.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		slog.Debug("request", "method", r.Method, "path", r.URL.Path, "query", r.URL.RawQuery)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("response", "method", r.Method, "path", r.URL.Path, "status", sw.status, "duration", time.Since(start))
+	})
+}
+
 // buildHandler wires up all routes and middleware.
 func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
 	mux := http.NewServeMux()
 
 	// /health is always unauthenticated.
-	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		handleHealth(w, r, storage, nc)
+	})
 
 	// All /api/* routes go through the apiHandler, optionally wrapped in auth.
 	var apiH http.Handler = &apiHandler{storage: storage, nc: nc}
@@ -86,13 +110,14 @@ func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
 		errJSON(w, http.StatusNotFound, "Not Found")
 	})
 
-	return mux
+	return loggingMiddleware(mux)
 }
 
 // authMiddleware rejects requests whose X-API-Key header does not match apiKey.
 func authMiddleware(apiKey string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-API-Key") != apiKey {
+			slog.Warn("unauthorized request", "method", r.Method, "path", r.URL.Path)
 			errJSON(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}

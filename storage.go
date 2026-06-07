@@ -28,17 +28,26 @@ func newStorage(dbPath string) (*Storage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS entries (
-		key   TEXT PRIMARY KEY,
-		value TEXT NOT NULL
-	)`); err != nil {
+	// Single connection serializes all access and avoids SQLITE_BUSY under
+	// concurrent reads + writes from the same process.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=WAL;
+		PRAGMA busy_timeout=5000;
+		CREATE TABLE IF NOT EXISTS entries (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	`); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("create table: %w", err)
+		return nil, fmt.Errorf("init db: %w", err)
 	}
 	return &Storage{db: db}, nil
 }
 
 func (s *Storage) close() error { return s.db.Close() }
+
+func (s *Storage) ping() error { return s.db.Ping() }
 
 func (s *Storage) get(key string) (*Entry, error) {
 	var value string

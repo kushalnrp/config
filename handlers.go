@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/nats-io/nats.go"
 )
@@ -16,11 +17,27 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func errJSON(w http.ResponseWriter, status int, msg string) {
+	if status >= 400 && status < 500 {
+		slog.Warn("request error", "status", status, "error", msg)
+	}
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// handleHealth is unauthenticated and always returns 200.
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+// handleHealth is unauthenticated and checks storage and NATS connectivity.
+func handleHealth(w http.ResponseWriter, r *http.Request, storage *Storage, nc *nats.Conn) {
+	slog.Debug("health: checking storage")
+	if err := storage.ping(); err != nil {
+		slog.Error("health: storage check failed", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "storage": "unavailable"})
+		return
+	}
+	slog.Debug("health: storage ok")
+
+	if nc != nil {
+		slog.Debug("health: checking NATS", "url", nc.ConnectedUrl())
+		slog.Debug("health: NATS ok", "connected", nc.IsConnected())
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -53,6 +70,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		entry, err := h.storage.get(key)
 		if err != nil {
+			slog.Error("storage get failed", "key", key, "error", err, "stack", string(debug.Stack()))
 			errJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -66,6 +84,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/getall" && r.Method == http.MethodGet:
 		entries, err := h.storage.getAll()
 		if err != nil {
+			slog.Error("storage getAll failed", "error", err, "stack", string(debug.Stack()))
 			errJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -92,6 +111,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.storage.set(key, value); err != nil {
+			slog.Error("storage set failed", "key", key, "error", err, "stack", string(debug.Stack()))
 			errJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -107,6 +127,7 @@ func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		n, err := h.storage.delete(key)
 		if err != nil {
+			slog.Error("storage delete failed", "key", key, "error", err, "stack", string(debug.Stack()))
 			errJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
