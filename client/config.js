@@ -84,6 +84,10 @@ class Config {
     this.#listeners.get(key).add(callback);
   }
 
+  async reload() {
+    await this.#syncCache();
+  }
+
   close() {
     clearInterval(this.#reloadTimer);
     this.#reloadTimer = null;

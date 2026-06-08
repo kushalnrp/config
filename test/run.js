@@ -153,6 +153,111 @@ test("seed: seed keys can be overwritten", async (client) => {
   assertEqual(await client.get("seed.key"), "updated");
 });
 
+test("onChange fires callback when a key is updated", async (client) => {
+  await client.set("token", "old");
+  let called = false;
+  let gotNew, gotOld;
+  client.onChange("token", (newVal, oldVal) => { called = true; gotNew = newVal; gotOld = oldVal; });
+  await fetch(`http://127.0.0.1:${client._port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "token", value: "new" }),
+  });
+  await client.reload();
+  assert(called, "onChange was not called");
+  assertEqual(gotNew, "new");
+  assertEqual(gotOld, "old");
+});
+
+test("onChange fires callback when a key is deleted", async (client) => {
+  await client.set("token", "val");
+  let gotNew, gotOld;
+  client.onChange("token", (newVal, oldVal) => { gotNew = newVal; gotOld = oldVal; });
+  await fetch(`http://127.0.0.1:${client._port}/api/delete?key=token`, { method: "DELETE" });
+  await client.reload();
+  assert(gotNew === undefined, `newVal should be undefined, got ${JSON.stringify(gotNew)}`);
+  assertEqual(gotOld, "val");
+});
+
+test("onChange does not fire when value is unchanged", async (client) => {
+  await client.set("stable", "same");
+  let called = false;
+  client.onChange("stable", () => { called = true; });
+  await client.reload();
+  assert(!called, "onChange should not fire when value is unchanged");
+});
+
+test("all onChange callbacks fire for the same key", async (client) => {
+  await client.set("key", "before");
+  const calls = [];
+  client.onChange("key", (n, o) => calls.push(["a", n, o]));
+  client.onChange("key", (n, o) => calls.push(["b", n, o]));
+  await fetch(`http://127.0.0.1:${client._port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "key", value: "after" }),
+  });
+  await client.reload();
+  assertEqual(calls.length, 2, `Expected 2 callbacks, got ${calls.length}`);
+  assertArrayEqual(calls[0], ["a", "after", "before"]);
+  assertArrayEqual(calls[1], ["b", "after", "before"]);
+});
+
+test("onChange does not fire for keys that did not change", async (client) => {
+  await client.set("watched", "val");
+  await client.set("other", "x");
+  let called = false;
+  client.onChange("watched", () => { called = true; });
+  await fetch(`http://127.0.0.1:${client._port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "other", value: "y" }),
+  });
+  await client.reload();
+  assert(!called, "onChange for 'watched' should not fire when only 'other' changed");
+});
+
+test("onChange works without NATS (poll-only fallback)", async (client) => {
+  // The default client has no NATS configured — verify onChange still fires via
+  // explicit reload, simulating what happens when NATS is unavailable.
+  await client.set("key", "v1");
+  let fired = false;
+  client.onChange("key", () => { fired = true; });
+  await fetch(`http://127.0.0.1:${client._port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "key", value: "v2" }),
+  });
+  await client.reload();
+  assert(fired, "onChange did not fire without NATS");
+});
+
+test("periodic sync triggers onChange via reload interval", async (_client, server) => {
+  // Create a client with a 200ms reload interval to test the timer path.
+  Config.resetInstance();
+  const client = await new Config(`http://127.0.0.1:${server.port}`).init({ reloadIntervalMs: 200 });
+  try {
+    await client.set("periodic", "v1");
+    let gotNew, gotOld;
+    const fired = new Promise((resolve) => {
+      client.onChange("periodic", (newVal, oldVal) => { gotNew = newVal; gotOld = oldVal; resolve(); });
+    });
+    // Change the value on the server, bypassing the client cache.
+    await fetch(`http://127.0.0.1:${server.port}/api/put`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key: "periodic", value: "v2" }),
+    });
+    // Wait for the periodic sync to pick up the change (timeout 2s).
+    await Promise.race([fired, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000))]);
+    assertEqual(gotNew, "v2");
+    assertEqual(gotOld, "v1");
+  } finally {
+    client.close();
+    Config.resetInstance();
+  }
+});
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -190,7 +295,7 @@ async function main() {
         client._port = server.port;
       }
 
-      await t.fn(client);
+      await t.fn(client, server);
       console.log(`  ✓ ${t.name}`);
       passed++;
     } catch (err) {

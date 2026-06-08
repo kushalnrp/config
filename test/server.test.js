@@ -135,3 +135,82 @@ test("GET /health returns 200 ok", async () => {
   expect(r.status).toBe(200);
   expect(await r.json()).toEqual({ status: "ok" });
 });
+
+test("onChange fires callback when a key is updated", async () => {
+  await client.set("token", "old");
+
+  let called = false;
+  let gotNew, gotOld;
+  client.onChange("token", (newVal, oldVal) => { called = true; gotNew = newVal; gotOld = oldVal; });
+
+  await fetch(`http://127.0.0.1:${app.port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "token", value: "new" }),
+  });
+  await client.reload();
+
+  expect(called).toBe(true);
+  expect(gotNew).toBe("new");
+  expect(gotOld).toBe("old");
+});
+
+test("onChange fires callback when a key is deleted", async () => {
+  await client.set("token", "val");
+
+  let gotNew, gotOld;
+  client.onChange("token", (newVal, oldVal) => { gotNew = newVal; gotOld = oldVal; });
+
+  await fetch(`http://127.0.0.1:${app.port}/api/delete?key=token`, { method: "DELETE" });
+  await client.reload();
+
+  expect(gotNew).toBeUndefined();
+  expect(gotOld).toBe("val");
+});
+
+test("onChange does not fire when value is unchanged", async () => {
+  await client.set("stable", "same");
+
+  let called = false;
+  client.onChange("stable", () => { called = true; });
+
+  await client.reload();
+
+  expect(called).toBe(false);
+});
+
+test("all onChange callbacks fire for the same key", async () => {
+  await client.set("key", "before");
+
+  const calls = [];
+  client.onChange("key", (n, o) => calls.push(["a", n, o]));
+  client.onChange("key", (n, o) => calls.push(["b", n, o]));
+
+  await fetch(`http://127.0.0.1:${app.port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "key", value: "after" }),
+  });
+  await client.reload();
+
+  expect(calls).toHaveLength(2);
+  expect(calls[0]).toEqual(["a", "after", "before"]);
+  expect(calls[1]).toEqual(["b", "after", "before"]);
+});
+
+test("onChange does not fire for keys that did not change", async () => {
+  await client.set("watched", "val");
+  await client.set("other", "x");
+
+  let called = false;
+  client.onChange("watched", () => { called = true; });
+
+  await fetch(`http://127.0.0.1:${app.port}/api/put`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "other", value: "y" }),
+  });
+  await client.reload();
+
+  expect(called).toBe(false);
+});

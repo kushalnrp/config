@@ -32,6 +32,11 @@ type clientOptions struct {
 	apiKey         string
 }
 
+type changeListener struct {
+	key      string
+	callback func(newVal, oldVal string)
+}
+
 // Option configures the Client.
 type Option func(*clientOptions)
 
@@ -60,13 +65,16 @@ func WithNATS(natsURL, user, pass string) Option {
 // Client talks to the config server and keeps a local in-memory cache.
 // Call Init once at startup; use Get/Set/Delete from any goroutine.
 type Client struct {
-	baseURL string
-	apiKey  string
-	mu      sync.RWMutex
-	cache   map[string]string
-	stop    chan struct{}
-	nc      *nats.Conn
-	sub     *nats.Subscription
+	baseURL     string
+	apiKey      string
+	mu          sync.RWMutex
+	cache       map[string]string
+	initialized bool
+	stop        chan struct{}
+	nc          *nats.Conn
+	sub         *nats.Subscription
+	listenersMu sync.RWMutex
+	listeners   map[string][]func(newVal, oldVal string)
 }
 
 var (
@@ -153,6 +161,24 @@ func Init(baseURL string, opts ...Option) (*Client, error) {
 		return nil, initErr
 	}
 	return instance, nil
+}
+
+// OnChange registers a callback that fires whenever key's value changes during
+// a cache refresh. The callback receives (newVal, oldVal); newVal is "" when
+// the key was deleted. Callbacks are not fired on the first (init-time) sync.
+func (c *Client) OnChange(key string, callback func(newVal, oldVal string)) {
+	c.listenersMu.Lock()
+	defer c.listenersMu.Unlock()
+	if c.listeners == nil {
+		c.listeners = make(map[string][]func(string, string))
+	}
+	c.listeners[key] = append(c.listeners[key], callback)
+}
+
+// Reload re-fetches all config from the server, updates the cache, and fires
+// any registered OnChange callbacks for keys whose values changed.
+func (c *Client) Reload() error {
+	return c.syncCache()
 }
 
 // GetInstance returns the singleton; panics if Init has not been called.
@@ -253,12 +279,33 @@ func (c *Client) syncCache() error {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return fmt.Errorf("config: parse getall response: %w", err)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cache = make(map[string]string, len(entries))
+
+	newCache := make(map[string]string, len(entries))
 	for _, e := range entries {
-		c.cache[e.Key] = e.Value
+		newCache[e.Key] = e.Value
 	}
+
+	c.mu.Lock()
+	prevCache := c.cache
+	wasInitialized := c.initialized
+	c.cache = newCache
+	c.initialized = true
+	c.mu.Unlock()
+
+	if wasInitialized {
+		c.listenersMu.RLock()
+		defer c.listenersMu.RUnlock()
+		for key, callbacks := range c.listeners {
+			oldVal := prevCache[key]
+			newVal := newCache[key]
+			if oldVal != newVal {
+				for _, cb := range callbacks {
+					cb(newVal, oldVal)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
