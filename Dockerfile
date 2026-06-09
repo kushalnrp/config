@@ -17,13 +17,11 @@ FROM alpine:latest
 WORKDIR /app
 
 COPY --from=builder /app/config-server .
-COPY config.json .
 
 RUN mkdir -p data
 
 ENV CONFIG_PORT=2001
 ENV CONFIG_DB_PATH=data/config.db
-ENV CONFIG_SEED_PATH=config.json
 EXPOSE 2001
 
 CMD ["./config-server"]
