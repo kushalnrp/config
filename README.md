@@ -26,16 +26,10 @@ go build -o config-server .
 
 ### Seeding
 
-Create a flat JSON file and point `CONFIG_SEED_PATH` at it. All key/value pairs are upserted into the DB on every startup:
-
-```json
-{
-  "app.name": "my-service",
-  "app.env": "production"
-}
-```
+Create a flat JSON file and point `CONFIG_SEED_PATH` at it. All key/value pairs are upserted into the DB on every startup. See `config.example.json` for the full set of keys this platform's services expect (copy it to `config.json` and fill in the placeholder NATS passwords from `nats.conf`):
 
 ```bash
+cp config.example.json config.json
 CONFIG_SEED_PATH=config.json ./config-server
 ```
 
