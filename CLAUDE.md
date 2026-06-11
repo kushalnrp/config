@@ -28,11 +28,11 @@ All `/api/*` routes require `X-API-Key` header when `API_KEY` env var is set.
 | `CONFIG_PORT` | `2001` | Listen port |
 | `CONFIG_DB_PATH` | `data/config.db` | SQLite path |
 | `API_KEY` | *(unset)* | Auth key for all API requests |
-| `CONFIG_SEED_PATH` | *(unset)* | JSON file upserted into DB at startup |
+| `CONFIG_SEED_PATH` | `config.seed.json` | JSON file upserted into DB at startup |
 
 ## Seeding
 
-Point `CONFIG_SEED_PATH` at a flat JSON file to pre-populate keys on startup. This is the primary way to inject secrets without committing them.
+`CONFIG_SEED_PATH` points at a flat JSON file used to pre-populate keys on startup, defaulting to `config.seed.json`. This is the primary way to inject secrets without committing them.
 
 ## Clients
 

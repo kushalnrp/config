@@ -32,7 +32,7 @@ func main() {
 	}
 	defer storage.close()
 
-	seedPath := os.Getenv("CONFIG_SEED_PATH")
+	seedPath := getEnv("CONFIG_SEED_PATH", "config.seed.json")
 	if err := seedFromFile(storage, seedPath); err != nil {
 		slog.Error("failed to seed", "path", seedPath, "error", err)
 		os.Exit(1)
