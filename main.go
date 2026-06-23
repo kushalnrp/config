@@ -23,7 +23,6 @@ func main() {
 	}
 
 	dbPath := getEnv("CONFIG_DB_PATH", "data/config.db")
-	apiKey := os.Getenv("API_KEY")
 
 	storage, err := newStorage(dbPath)
 	if err != nil {
@@ -57,7 +56,7 @@ func main() {
 		slog.Info("connected to NATS", "url", natsURL)
 	}
 
-	handler := buildHandler(storage, apiKey, nc)
+	handler := buildHandler(storage, nc)
 
 	addr := fmt.Sprintf(":%d", port)
 	slog.Info("config server listening", "port", port)
@@ -90,7 +89,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 }
 
 // buildHandler wires up all routes and middleware.
-func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
+func buildHandler(storage *Storage, nc *nats.Conn) http.Handler {
 	mux := http.NewServeMux()
 
 	// /health is always unauthenticated.
@@ -98,12 +97,8 @@ func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
 		handleHealth(w, r, storage, nc)
 	})
 
-	// All /api/* routes go through the apiHandler, optionally wrapped in auth.
-	var apiH http.Handler = &apiHandler{storage: storage, nc: nc}
-	if apiKey != "" {
-		apiH = authMiddleware(apiKey, apiH)
-	}
-	mux.Handle("/api/", apiH)
+	// All /api/* routes.
+	mux.Handle("/api/", &apiHandler{storage: storage, nc: nc})
 
 	// Catch-all 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -111,18 +106,6 @@ func buildHandler(storage *Storage, apiKey string, nc *nats.Conn) http.Handler {
 	})
 
 	return loggingMiddleware(mux)
-}
-
-// authMiddleware rejects requests whose X-API-Key header does not match apiKey.
-func authMiddleware(apiKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-API-Key") != apiKey {
-			slog.Warn("unauthorized request", "method", r.Method, "path", r.URL.Path)
-			errJSON(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // seedFromFile reads a flat JSON object from path and upserts each key/value
