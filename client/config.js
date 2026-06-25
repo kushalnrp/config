@@ -4,21 +4,19 @@ let instance = null;
 
 class Config {
   #url;
-  #apiKey;
   #cache = new Map();
   #reloadTimer = null;
   #natsSub = null;
   #listeners = new Map();
   #initialized = false;
 
-  constructor(url, apiKey = "") {
+  constructor(url) {
     if (!url) throw new Error("url is required");
     this.#url = url.replace(/\/$/, "");
-    this.#apiKey = process.env.CONFIG_API_KEY || apiKey;
   }
 
-  static getInstance(url, apiKey = "") {
-    if (!instance) instance = new Config(url, apiKey);
+  static getInstance(url) {
+    if (!instance) instance = new Config(url);
     return instance;
   }
 
@@ -98,10 +96,7 @@ class Config {
   async #request(path, options = {}) {
     let res;
     try {
-      const headers = {
-        ...(this.#apiKey ? { 'X-API-Key': this.#apiKey } : {}),
-        ...options.headers,
-      };
+      const headers = { ...options.headers };
       res = await fetch(`${this.#url}${path}`, { ...options, headers });
     } catch (err) {
       throw new Error(`Config server unreachable: ${err.message}`);

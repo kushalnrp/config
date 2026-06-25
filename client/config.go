@@ -29,7 +29,6 @@ type clientOptions struct {
 	natsURL        string
 	natsUser       string
 	natsPass       string
-	apiKey         string
 }
 
 type changeListener struct {
@@ -44,11 +43,6 @@ type Option func(*clientOptions)
 // Pass 0 to disable polling (only useful when NATS is configured).
 func WithReloadInterval(d time.Duration) Option {
 	return func(o *clientOptions) { o.reloadInterval = d }
-}
-
-// WithAPIKey sets the X-API-Key header on all requests to the config server.
-func WithAPIKey(key string) Option {
-	return func(o *clientOptions) { o.apiKey = key }
 }
 
 // WithNATS subscribes to config.updated on the given NATS server so the cache
@@ -66,7 +60,6 @@ func WithNATS(natsURL, user, pass string) Option {
 // Call Init once at startup; use Get/Set/Delete from any goroutine.
 type Client struct {
 	baseURL     string
-	apiKey      string
 	mu          sync.RWMutex
 	cache       map[string]string
 	initialized bool
@@ -95,7 +88,6 @@ func Init(baseURL string, opts ...Option) (*Client, error) {
 	once.Do(func() {
 		c := &Client{
 			baseURL: strings.TrimRight(baseURL, "/"),
-			apiKey:  o.apiKey,
 			cache:   make(map[string]string),
 			stop:    make(chan struct{}),
 		}
@@ -244,9 +236,6 @@ func (c *Client) do(method, path string, reqBody any) ([]byte, error) {
 	}
 	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.apiKey != "" {
-		req.Header.Set("X-API-Key", c.apiKey)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

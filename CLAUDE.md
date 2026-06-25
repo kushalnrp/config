@@ -19,15 +19,12 @@ POST /api/set                  → { key, value }
 GET  /api/all                  → { key: value, ... }
 ```
 
-All `/api/*` routes require `X-API-Key` header when `API_KEY` env var is set.
-
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CONFIG_PORT` | `2001` | Listen port |
 | `CONFIG_DB_PATH` | `data/config.db` | SQLite path |
-| `API_KEY` | *(unset)* | Auth key for all API requests |
 | `CONFIG_SEED_PATH` | `config.seed.json` | JSON file upserted into DB at startup |
 
 ## Seeding

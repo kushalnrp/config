@@ -21,7 +21,6 @@ go build -o config-server .
 |-------------------|------------------|--------------------------------------------------|
 | `CONFIG_PORT`     | `2001`           | Port the server listens on                       |
 | `CONFIG_DB_PATH`  | `data/config.db` | Path to the SQLite database file                 |
-| `API_KEY`         | *(unset)*        | When set, all `/api/*` requests require `X-API-Key: <value>` |
 | `CONFIG_SEED_PATH`| `config.seed.json` | Path to a JSON seed file loaded at startup    |
 
 ### Seeding
@@ -42,7 +41,7 @@ docker run -p 2001:2001 -v $(pwd)/config.seed.json:/app/config.seed.json:ro conf
 
 ### API
 
-All routes are under `/api/`. Authenticated routes require `X-API-Key` when `API_KEY` is set.
+All routes are under `/api/`.
 
 | Method   | Path              | Body / Query     | Description            |
 |----------|-------------------|------------------|------------------------|

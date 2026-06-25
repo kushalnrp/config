@@ -64,7 +64,7 @@ func TestPublishesConfigUpdatedOnPutAndDelete(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = storage.close() })
 
-	ts := httptest.NewServer(buildHandler(storage, "", nc))
+	ts := httptest.NewServer(buildHandler(storage, nc))
 	t.Cleanup(ts.Close)
 
 	body, _ := json.Marshal(map[string]string{"key": "nats.key", "value": "v1"})
