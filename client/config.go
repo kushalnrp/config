@@ -97,8 +97,18 @@ func Init(baseURL string, opts ...Option) (*Client, error) {
 			return
 		}
 
-		// NATS subscription for push-based cache refresh.
-		if o.natsURL != "" {
+		// NATS subscription for push-based cache refresh. Connection details come
+		// from the explicit WithNATS option if set; otherwise they are
+		// bootstrapped from the config just synced (nats.url + the config-reader
+		// credentials), so a service needs only its config URL to get instant
+		// updates — no NATS env duplicated into every service.
+		natsURL, natsUser, natsPass := o.natsURL, o.natsUser, o.natsPass
+		if natsURL == "" {
+			natsURL = c.cache["nats.url"]
+			natsUser = c.cache["nats.config.user"]
+			natsPass = c.cache["nats.config.password"]
+		}
+		if natsURL != "" {
 			natsopts := []nats.Option{
 				nats.MaxReconnects(-1),
 				nats.ReconnectWait(2 * time.Second),
@@ -122,10 +132,10 @@ func Init(baseURL string, opts ...Option) (*Client, error) {
 					log.Printf("[config] NATS error: %v", err)
 				}),
 			}
-			if o.natsUser != "" {
-				natsopts = append(natsopts, nats.UserInfo(o.natsUser, o.natsPass))
+			if natsUser != "" {
+				natsopts = append(natsopts, nats.UserInfo(natsUser, natsPass))
 			}
-			nc, err := nats.Connect(o.natsURL, natsopts...)
+			nc, err := nats.Connect(natsURL, natsopts...)
 			if err != nil {
 				log.Printf("[config] NATS connect failed, using poll-only mode: %v", err)
 			} else {
@@ -291,6 +301,8 @@ func (c *Client) syncCache() error {
 				for _, cb := range callbacks {
 					cb(newVal, oldVal)
 				}
+			} else {
+				log.Printf("[config] %s unchanged on reload; skipping OnChange", key)
 			}
 		}
 	}
